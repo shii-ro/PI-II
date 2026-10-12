@@ -11,13 +11,15 @@
 #include "lvgl.h"
 #include "db18b20.h"
 
-#define DS18B20_PIN GPIO_NUM_4
+#define DS18B20_PIN   GPIO_NUM_4
 #define LCD_HOST      SPI2_HOST
-#define LCD_PIN_SCLK  GPIO_NUM_18
-#define LCD_PIN_MOSI  GPIO_NUM_23
+
+#define LED_PIN GPIO_NUM_23
+#define LCD_PIN_SCLK  GPIO_NUM_22
+#define LCD_PIN_MOSI  GPIO_NUM_21
 #define LCD_PIN_CS    GPIO_NUM_5
-#define LCD_PIN_DC    GPIO_NUM_2
-#define LCD_PIN_RST   GPIO_NUM_15
+#define LCD_PIN_DC    GPIO_NUM_19
+#define LCD_PIN_RST   GPIO_NUM_18
 #define LCD_H_RES     240
 #define LCD_V_RES     320
 
@@ -57,6 +59,17 @@ static void ui_create(void)
 
 static lv_display_t *display_init(void)
 {
+    gpio_config_t led_config = {
+    .pin_bit_mask = 1ULL << LED_PIN,
+    .mode = GPIO_MODE_OUTPUT,
+    .pull_up_en = GPIO_PULLUP_DISABLE,
+    .pull_down_en = GPIO_PULLDOWN_DISABLE,
+    .intr_type = GPIO_INTR_DISABLE,
+    };
+
+    ESP_ERROR_CHECK(gpio_config(&led_config));
+    gpio_set_level(LED_PIN, 1);  // LED off initially
+
     /* SPI bus */
     const spi_bus_config_t buscfg = {
         .sclk_io_num = LCD_PIN_SCLK,
@@ -71,13 +84,13 @@ static lv_display_t *display_init(void)
     /* Panel IO: component's default macro (40 MHz, SPI mode 0, 8-bit cmd/param) */
     esp_lcd_panel_io_handle_t io_handle = NULL;
     const esp_lcd_panel_io_spi_config_t io_config =
-        ILI9341_PANEL_IO_SPI_CONFIG(LCD_PIN_CS, LCD_PIN_DC, NULL, NULL);
-    ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST,
-                                             &io_config, &io_handle));
+    ILI9341_PANEL_IO_SPI_CONFIG(LCD_PIN_CS, LCD_PIN_DC, NULL, NULL);
+    ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST, &io_config, &io_handle));
 
     /* Panel driver */
     esp_lcd_panel_handle_t panel_handle = NULL;
-    const esp_lcd_panel_dev_config_t panel_config = {
+    const esp_lcd_panel_dev_config_t panel_config = 
+    {
         .reset_gpio_num = LCD_PIN_RST,
         .rgb_ele_order  = LCD_RGB_ELEMENT_ORDER_BGR,
         .bits_per_pixel = 16,
@@ -95,7 +108,8 @@ static lv_display_t *display_init(void)
     const lvgl_port_cfg_t lvgl_cfg = ESP_LVGL_PORT_INIT_CONFIG();
     ESP_ERROR_CHECK(lvgl_port_init(&lvgl_cfg));
 
-    const lvgl_port_display_cfg_t disp_cfg = {
+    const lvgl_port_display_cfg_t disp_cfg = 
+    {
         .io_handle     = io_handle,
         .panel_handle  = panel_handle,
         .buffer_size   = LCD_H_RES * 40,
