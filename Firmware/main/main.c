@@ -6,28 +6,30 @@
 #include "driver/spi_master.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
-#include "esp_lcd_ili9341.h"
+#include "esp_lcd_panel_st7789.h"
 #include "esp_lvgl_port.h"
 #include "lvgl.h"
 #include "db18b20.h"
+#include "ble_temp.h"
+#include "ui.h"
 
-#define DS18B20_PIN   GPIO_NUM_4
+#define DS18B20_PIN   GPIO_NUM_26
 #define LCD_HOST      SPI2_HOST
 
-#define LED_PIN GPIO_NUM_23
+#define LED_PIN       GPIO_NUM_23
 #define LCD_PIN_SCLK  GPIO_NUM_22
 #define LCD_PIN_MOSI  GPIO_NUM_21
 #define LCD_PIN_CS    GPIO_NUM_5
 #define LCD_PIN_DC    GPIO_NUM_19
 #define LCD_PIN_RST   GPIO_NUM_18
-#define LCD_H_RES     240
-#define LCD_V_RES     320
+#define LCD_H_RES     320
+#define LCD_V_RES     240
 
 static const char *TAG = "Temperature Display";
 
 static ds18b20_handle_t s_sensor;
-static lv_obj_t *s_label;
 
+/* Runs on the LVGL task, so the LVGL lock is already held. */
 static void temp_timer_cb(lv_timer_t *t)
 {
     (void)t;
@@ -36,35 +38,23 @@ static void temp_timer_cb(lv_timer_t *t)
     esp_err_t err = ds18b20_get_latest(s_sensor, &temp, &age_ms);
 
     if (err == ESP_ERR_NOT_FINISHED) {
-        lv_label_set_text(s_label, "-- \xC2\xB0""C");
+        ui_show_temp_waiting();
     } else if (err != ESP_OK) {
-        lv_label_set_text(s_label, "Sensor error");
+        ui_show_temp_error();
     } else {
-        /* LVGL's printf has no float support by default, so use integers. */
-        int t10 = (int)lroundf(temp * 10.0f);
-        lv_label_set_text_fmt(s_label, "%s%d.%d \xC2\xB0""C",
-                              t10 < 0 ? "-" : "", abs(t10) / 10, abs(t10) % 10);
+        ui_show_temperature(temp);
+        ble_temp_update(temp);
     }
-}
-
-static void ui_create(void)
-{
-    s_label = lv_label_create(lv_screen_active());   /* LVGL 9; LVGL 8: lv_scr_act() */
-    lv_obj_set_style_text_font(s_label, &lv_font_montserrat_14, 0);
-    lv_obj_center(s_label);
-    lv_label_set_text(s_label, "-- \xC2\xB0""C");
-
-    lv_timer_create(temp_timer_cb, 500, NULL);
 }
 
 static lv_display_t *display_init(void)
 {
     gpio_config_t led_config = {
-    .pin_bit_mask = 1ULL << LED_PIN,
-    .mode = GPIO_MODE_OUTPUT,
-    .pull_up_en = GPIO_PULLUP_DISABLE,
-    .pull_down_en = GPIO_PULLDOWN_DISABLE,
-    .intr_type = GPIO_INTR_DISABLE,
+        .pin_bit_mask = 1ULL << LED_PIN,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
     };
 
     ESP_ERROR_CHECK(gpio_config(&led_config));
@@ -81,35 +71,39 @@ static lv_display_t *display_init(void)
     };
     ESP_ERROR_CHECK(spi_bus_initialize(LCD_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
-    /* Panel IO: component's default macro (40 MHz, SPI mode 0, 8-bit cmd/param) */
+    /* Panel IO: SPI mode 3 */
     esp_lcd_panel_io_handle_t io_handle = NULL;
-    const esp_lcd_panel_io_spi_config_t io_config =
-    ILI9341_PANEL_IO_SPI_CONFIG(LCD_PIN_CS, LCD_PIN_DC, NULL, NULL);
-    ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST, &io_config, &io_handle));
+    const esp_lcd_panel_io_spi_config_t io_config = {
+        .cs_gpio_num       = LCD_PIN_CS,
+        .dc_gpio_num       = LCD_PIN_DC,
+        .spi_mode          = 3,
+        .pclk_hz           = 20 * 1000 * 1000,
+        .trans_queue_depth = 10,
+        .lcd_cmd_bits      = 8,
+        .lcd_param_bits    = 8,
+    };
+    ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST,
+                                            &io_config, &io_handle));
 
     /* Panel driver */
     esp_lcd_panel_handle_t panel_handle = NULL;
-    const esp_lcd_panel_dev_config_t panel_config = 
-    {
+    const esp_lcd_panel_dev_config_t panel_config = {
         .reset_gpio_num = LCD_PIN_RST,
-        .rgb_ele_order  = LCD_RGB_ELEMENT_ORDER_BGR,
+        .rgb_ele_order  = LCD_RGB_ELEMENT_ORDER_RGB,
         .bits_per_pixel = 16,
     };
-    ESP_ERROR_CHECK(esp_lcd_new_panel_ili9341(io_handle, &panel_config, &panel_handle));
+    ESP_ERROR_CHECK(esp_lcd_new_panel_st7789(io_handle, &panel_config, &panel_handle));
 
     ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
-    /* If the image is mirrored/flipped on your module, tweak these: */
-    // ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel_handle, true, false));
-    // ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(panel_handle, false));
+    ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel_handle, true));
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
 
     /* LVGL via esp_lvgl_port */
     const lvgl_port_cfg_t lvgl_cfg = ESP_LVGL_PORT_INIT_CONFIG();
     ESP_ERROR_CHECK(lvgl_port_init(&lvgl_cfg));
 
-    const lvgl_port_display_cfg_t disp_cfg = 
-    {
+    const lvgl_port_display_cfg_t disp_cfg = {
         .io_handle     = io_handle,
         .panel_handle  = panel_handle,
         .buffer_size   = LCD_H_RES * 40,
@@ -117,7 +111,7 @@ static lv_display_t *display_init(void)
         .hres          = LCD_H_RES,
         .vres          = LCD_V_RES,
         .monochrome    = false,
-        .rotation      = { .swap_xy = false, .mirror_x = false, .mirror_y = false },
+        .rotation      = { .swap_xy = true, .mirror_x = true, .mirror_y = false },
         .flags         = { .buff_dma = true, .swap_bytes = true },
     };
     return lvgl_port_add_disp(&disp_cfg);
@@ -135,10 +129,14 @@ void app_main(void)
     cfg.period_ms  = 1000;
     ESP_ERROR_CHECK(ds18b20_create(&cfg, &s_sensor));
 
-    /* 3) Build the UI (LVGL port lock required). */
+    /* 3) Build the UI and start the polling timer (LVGL lock required). */
     lvgl_port_lock(0);
     ui_create();
+    lv_timer_create(temp_timer_cb, 500, NULL);
     lvgl_port_unlock();
+
+    /* 4) BLE last: its state callback touches UI objects that must exist. */
+    ble_temp_init(NULL, ui_set_ble_state_safe);
 
     ESP_LOGI(TAG, "running");
 }
