@@ -26,8 +26,10 @@ static const ble_uuid128_t RELAY_UUID = BLE_UUID128_INIT(
 
 static uint8_t  s_own_addr_type;
 static uint16_t s_temp_val_handle;
-static char     s_json[24] = "{\"t\":0.00}";   /* keep <= 20 bytes */
-static size_t   s_json_len = 10;
+static char    s_json[64];
+static size_t  s_json_len;
+static bool    s_relay_state = false;
+
 static volatile bool s_connected = false;
 static void (*s_relay_cb)(bool) = NULL;
 
@@ -46,12 +48,16 @@ static int temp_access_cb(uint16_t conn, uint16_t attr,
 static int relay_access_cb(uint16_t conn, uint16_t attr,
                            struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        uint8_t v = s_relay_state ? '1' : '0';
+        return os_mbuf_append(ctxt->om, &v, 1) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
     if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
         if (OS_MBUF_PKTLEN(ctxt->om) < 1) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
         uint8_t b = 0;
         os_mbuf_copydata(ctxt->om, 0, 1, &b);
-        ESP_LOGI(TAG, "relay write: %c", b);
-        if (s_relay_cb) s_relay_cb(b == '1');
+        s_relay_state = (b == '1');
+        if (s_relay_cb) s_relay_cb(s_relay_state);
         return 0;
     }
     return BLE_ATT_ERR_UNLIKELY;
@@ -184,9 +190,9 @@ void ble_temp_update(float celsius)
 {
     int c = (int)lroundf(celsius * 100.0f);
     int a = abs(c);
-    s_json_len = snprintf(s_json, sizeof(s_json), "{\"t\":%s%d.%02d}",
-                          c < 0 ? "-" : "", a / 100, a % 100);
-    ble_gatts_chr_updated(s_temp_val_handle);   /* notifies the app if subscribed */
+    s_json_len = snprintf(s_json, sizeof(s_json), "{\"t\":%s%d.%02d,\"r\":%d}",
+                          c < 0 ? "-" : "", a / 100, a % 100, s_relay_state ? 1 : 0);
+    ble_gatts_chr_updated(s_temp_val_handle);
 }
 
 bool ble_temp_is_connected(void) { return s_connected; }
